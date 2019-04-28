@@ -5,8 +5,12 @@ use super::Segment as SegmentTrait;
 use super::SharedLibrary as SharedLibraryTrait;
 
 use std::any::Any;
-use std::ffi::CStr;
+use std::ffi::{CStr, CString};
+use std::os::unix::ffi::{OsStringExt};
+use std::borrow::Cow;
 use std::fmt;
+use std::mem;
+use std::env::current_exe;
 use std::isize;
 use std::marker::PhantomData;
 use std::panic;
@@ -22,6 +26,14 @@ cfg_if! {
     } else {
         // Unsupported.
     }
+}
+
+const NT_GNU_BUILD_ID: u32 = 3;
+
+struct Nhdr32 {
+    pub n_namesz: libc::Elf32_Word,
+    pub n_descsz: libc::Elf32_Word,
+    pub n_type: libc::Elf32_Word,
 }
 
 /// A mapped segment in an ELF file.
@@ -108,11 +120,10 @@ impl<'a> fmt::Debug for SegmentIter<'a> {
 }
 
 /// A shared library on Linux.
-#[derive(Clone, Copy)]
 pub struct SharedLibrary<'a> {
     size: usize,
     addr: *const u8,
-    name: &'a CStr,
+    name: Cow<'a, CStr>,
     headers: &'a [Phdr],
 }
 
@@ -126,10 +137,16 @@ const BREAK: libc::c_int = 1;
 
 impl<'a> SharedLibrary<'a> {
     unsafe fn new(info: &'a libc::dl_phdr_info, size: usize) -> Self {
+        let mut name = Cow::Borrowed(CStr::from_ptr(info.dlpi_name));
+        if name.to_bytes().is_empty() {
+            if let Ok(exe) = current_exe() {
+                name = Cow::Owned(CString::from_vec_unchecked(exe.into_os_string().into_vec()));
+            }
+        }
         SharedLibrary {
             size: size,
             addr: info.dlpi_addr as usize as *const _,
-            name: CStr::from_ptr(info.dlpi_name),
+            name,
             headers: slice::from_raw_parts(info.dlpi_phdr, info.dlpi_phnum as usize),
         }
     }
@@ -165,11 +182,53 @@ impl<'a> SharedLibraryTrait for SharedLibrary<'a> {
 
     #[inline]
     fn name(&self) -> &CStr {
-        self.name
+        &*self.name
     }
 
-    #[inline]
     fn id(&self) -> Option<SharedLibraryId> {
+        fn align(alignment: usize, offset: &mut usize) {
+            let diff = *offset % alignment;
+            if diff != 0 {
+                *offset += alignment - diff;
+            }
+        }
+
+        unsafe {
+            for segment in self.segments() {
+                let phdr = segment.phdr.as_ref().unwrap();
+                if phdr.p_type != libc::PT_NOTE {
+                    continue;
+                }
+
+                let mut alignment = phdr.p_align as usize;
+                // same logic as in gimli which took it from readelf
+                if alignment < 4 {
+                    alignment = 4;
+                } else if alignment != 4 && alignment != 8 {
+                    continue;
+                }
+
+                let mut offset = phdr.p_offset as usize;
+                let end = offset + phdr.p_filesz as usize;
+
+                while offset < end {
+                    // we always use an nhdr32 here as 64bit notes have not
+                    // been observed in practice.
+                    let nhdr = &*((self.addr as usize + offset) as *const Nhdr32);
+                    offset += mem::size_of_val(nhdr);
+                    offset += nhdr.n_namesz as usize;
+                    align(alignment, &mut offset);
+                    let value = slice::from_raw_parts(self.addr.add(offset), nhdr.n_descsz as usize);
+                    offset += nhdr.n_descsz as usize;
+                    align(alignment, &mut offset);
+
+                    if nhdr.n_type as u32 == NT_GNU_BUILD_ID {
+                        return Some(SharedLibraryId::GnuBuildId(value.to_vec()));
+                    }
+                }
+            }
+        }
+
         None
     }
 
@@ -284,9 +343,46 @@ mod tests {
 
     #[test]
     fn get_name() {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
         linux::SharedLibrary::each(|shlib| {
             println!("{:?}", shlib);
-            let _ = shlib.name();
+            let name = OsStr::from_bytes(shlib.name().to_bytes());
+            assert!(name != OsStr::new(""));
+        });
+    }
+
+    #[test]
+    fn get_id() {
+        use std::path::Path;
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+        use std::process::Command;
+
+        linux::SharedLibrary::each(|shlib| {
+            let name = OsStr::from_bytes(shlib.name().to_bytes());
+            let id = shlib.id();
+            if id.is_none() {
+                println!("no id found for {:?}", name);
+                return;
+            }
+            let path: &Path = name.as_ref();
+            if !path.is_absolute() {
+                return;
+            }
+            let gnu_build_id = id.unwrap().to_string();
+            let readelf = Command::new("readelf")
+                .arg("-n")
+                .arg(path)
+                .output()
+                .unwrap();
+            for line in String::from_utf8(readelf.stdout).unwrap().lines() {
+                if let Some(index) = line.find("Build ID: ") {
+                    let readelf_build_id = line[index + 9..].trim();
+                    assert_eq!(readelf_build_id, gnu_build_id);
+                }
+            }
+            println!("{}: {}", path.display(), gnu_build_id);
         });
     }
 
