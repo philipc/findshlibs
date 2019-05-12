@@ -138,6 +138,8 @@ const BREAK: libc::c_int = 1;
 impl<'a> SharedLibrary<'a> {
     unsafe fn new(info: &'a libc::dl_phdr_info, size: usize) -> Self {
         let mut name = Cow::Borrowed(CStr::from_ptr(info.dlpi_name));
+        println!("addr {:x}, path {}", info.dlpi_addr, name.to_string_lossy());
+        println!();
         if name.to_bytes().is_empty() {
             if let Ok(exe) = current_exe() {
                 name = Cow::Owned(CString::from_vec_unchecked(exe.into_os_string().into_vec()));
@@ -370,6 +372,7 @@ mod tests {
             if !path.is_absolute() {
                 return;
             }
+            println!("id for {}", path.display());
             let gnu_build_id = id.unwrap().to_string();
             let readelf = Command::new("readelf")
                 .arg("-n")
@@ -379,11 +382,13 @@ mod tests {
             for line in String::from_utf8(readelf.stdout).unwrap().lines() {
                 if let Some(index) = line.find("Build ID: ") {
                     let readelf_build_id = line[index + 9..].trim();
-                    assert_eq!(readelf_build_id, gnu_build_id);
+                    println!("readelf: {}", readelf_build_id);
                 }
             }
-            println!("{}: {}", path.display(), gnu_build_id);
+            println!("findshlibs: {}", gnu_build_id);
+            println!();
         });
+        panic!();
     }
 
     #[test]

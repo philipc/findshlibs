@@ -1,36 +1,40 @@
 sudo: false
-
 dist: trusty
-
 language: rust
-
 os:
 - linux
-- osx
-
 rust:
-- nightly
-- beta
 - stable
-
 addons:
   sources:
-    - llvm-toolchain-trusty-3.9 # Provides clang-3.9
+  - llvm-toolchain-trusty-3.9
   apt:
     packages:
     - binutils-dev
-    - clang-3.9               # Required for bindgen
+    - clang-3.9
     - libcurl4-openssl-dev
     - libelf-dev
     - libdw-dev
-
 before_install:
 - source ./ci/before_install.sh
-
 env:
   matrix:
-  - PROFILE="--release"
   - PROFILE=""
-
 script:
 - PROFILE="$PROFILE" ./ci/script.sh
+before_deploy:
+- pwd
+- ls -l target
+- export RELEASE_FILE=target/debug.tar.gz
+- tar czf $RELEASE_FILE ./target/debug
+- ls -l $RELEASE_FILE
+deploy:
+  skip_cleanup: true
+  provider: releases
+  api_key:
+    secure: C4yfaJZqJ30vfFiYbx6gopBJYuJdFsiHPjCgCFhgFnUcqy0liahIUVP19Hvq4/LkS/pelXh/06hHlln6mju1dOVWPIXu5zzJSMGVL97MUJmUVU7F4f2FfZ1EXIU0Uo/5a0TXuGEx5eEIF3EB4mj1bIHp8go/GyjutnL847w6+uNLicmR4Ui/ybqb+WjSnWT0IcIu+mnPyycFBVHT8qeLrNYldGhfRPi10iOHKfw4DlKvFw8Nj+E3jS3vHbU6EJOQbgh23GyjTrKMiU6Lnsd8MNDfAm3OJ+kDsX+1Q9JPHonchhNpP7r5HCV00ZiMJcMhauUkQ31hHUXOLOckyYDbY9oYTy3MFCfGm4+ZW+2z5/WNTggvSpdrYPlHJNklhpNXippNhzL3Ib6noRo/119HJdi9xAVJMaYiXrIHqWXdZ6TBZVOICjn3UaOXwA4VGYVk6Z28DLsnmmzJnKQ69dZHzOzp4/OkvYD0SkZshN4kz4UPID++XURNQYSVmzcTP/PFpwNTkIvwadhau6tt3PGkD+6hgaRMBxOR9CZQNLQW3ox+dvtjjHjhliU54F5qVafctMCd9+W6t7QC50iSiWAge9WeXHepUz8oJA+twB+WBRCdE6hB95tqK4y0amFwKKR33LgxHhurB5RJXPjK6Yi/vZvsoZDIupU3MUeZNS0ruFw=
+  file: "$RELEASE_FILE"
+  draft: true
+  on:
+    repo: philipc/findshlibs
+    branch: pr34
